@@ -9,7 +9,6 @@ from pathlib import Path
 
 # ── Demucs full stem separation ─────────────────────────────────────────────
 def separate_stems(audio_path: str, progress=gr.Progress()):
-    """Step 1: Demucs splits into drums / bass / other / vocals."""
     progress(0.05, desc="Loading audio...")
     from demucs.pretrained import get_model
     from demucs.apply import apply_model
@@ -33,7 +32,6 @@ def separate_stems(audio_path: str, progress=gr.Progress()):
     with torch.no_grad():
         sources = apply_model(model, waveform.unsqueeze(0).to(device), device=device)[0]
 
-    # htdemucs source order: drums, bass, other, vocals
     stems = {
         "drums":  sources[0].cpu(),
         "bass":   sources[1].cpu(),
@@ -54,7 +52,6 @@ def separate_stems(audio_path: str, progress=gr.Progress()):
 
 # ── Pitch-based gender split ─────────────────────────────────────────────────
 def classify_and_split(vocals_path: str, sr_hint: int, progress=gr.Progress()):
-    """Step 2: Split the vocals stem into male / female by F0."""
     waveform, sr = torchaudio.load(vocals_path)
     if waveform.shape[0] > 1:
         mono = waveform.mean(0, keepdim=True)
@@ -126,12 +123,11 @@ def run_pipeline(audio_file, skip_demucs, progress=gr.Progress()):
         raise gr.Error("Please upload an audio file first.")
     try:
         device_str = (
-            f"GPU: {torch.cuda.get_device_name(0)}"
+            "GPU: " + torch.cuda.get_device_name(0)
             if torch.cuda.is_available() else "CPU (no CUDA GPU detected)"
         )
 
         if skip_demucs:
-            # User supplies a clean vocal stem — skip straight to gender split
             vocals_path = audio_file
             _, sr = torchaudio.load(audio_file)
             drums_path = bass_path = other_path = None
@@ -150,46 +146,29 @@ def run_pipeline(audio_file, skip_demucs, progress=gr.Progress()):
         total        = len(labels)
 
         summary = (
-            f"{'Stems separated + ' if not skip_demucs else ''}Gender split complete\n"
-            f"─────────────────────────────\n"
-            f"Segments analysed : {total} ({total * 2}s)\n"
-            f"Male              : {male_count} ({100 * male_count // max(total, 1)}%)\n"
-            f"Female            : {female_count} ({100 * female_count // max(total, 1)}%)\n"
-            f"Unvoiced / silent : {unknown}\n"
-            f"─────────────────────────────\n"
-            f"{device_str}"
+            ("Stems separated + " if not skip_demucs else "") + "Gender split complete\n"
+            + "-" * 33 + "\n"
+            + "Segments analysed : " + str(total) + " (" + str(total * 2) + "s)\n"
+            + "Male              : " + str(male_count) + " (" + str(100 * male_count // max(total, 1)) + "%)\n"
+            + "Female            : " + str(female_count) + " (" + str(100 * female_count // max(total, 1)) + "%)\n"
+            + "Unvoiced / silent : " + str(unknown) + "\n"
+            + "-" * 33 + "\n"
+            + device_str
         )
 
         progress(1.0, desc="Done!")
         return drums_path, bass_path, other_path, vocals_path, male_path, female_path, summary
 
     except Exception as e:
-        raise gr.Error(f"Processing failed: {str(e)}")
+        raise gr.Error("Processing failed: " + str(e))
 
 
 # ── Gradio UI ────────────────────────────────────────────────────────────────
-# with gr.Blocks(
-#    title="Vocal Gender Splitter",
-#    theme=gr.themes.Soft(primary_hue="blue", neutral_hue="slate"),
-#    css="""
 with gr.Blocks(title="Vocal Gender Splitter") as demo:
-        .gradio-container { max-width: 960px !important; margin: auto; }
-        #title    { text-align: center; margin-bottom: 0.25rem; }
-        #subtitle { text-align: center; color: #64748b; margin-bottom: 1.5rem; font-size: 0.9rem; }
-        footer    { display: none !important; }
-        .section-label { font-weight: 600; font-size: 0.85rem; color: #475569;
-                          text-transform: uppercase; letter-spacing: 0.05em;
-                          margin: 1rem 0 0.5rem; }
-    """,
-) as demo:
 
-    gr.Markdown("# Vocal Gender Splitter", elem_id="title")
-    gr.Markdown(
-        "Full pipeline: **stem separation** (drums / bass / other / vocals) → **gender split** (male / female)",
-        elem_id="subtitle",
-    )
+    gr.Markdown("# Vocal Gender Splitter")
+    gr.Markdown("Full pipeline: **stem separation** (drums / bass / other / vocals) then **gender split** (male / female)")
 
-    # ── Input ──
     with gr.Row():
         with gr.Column(scale=1):
             audio_input = gr.Audio(label="Upload audio", type="filepath", sources=["upload"])
@@ -203,24 +182,17 @@ with gr.Blocks(title="Vocal Gender Splitter") as demo:
         with gr.Column(scale=1):
             summary_out = gr.Textbox(label="Summary", lines=9, interactive=False)
 
-    # ── Stems output ──
-    gr.Markdown("### Separated stems", elem_classes=["section-label"])
+    gr.Markdown("### Separated stems")
     with gr.Row():
         drums_out  = gr.Audio(label="Drums",  type="filepath", interactive=False)
         bass_out   = gr.Audio(label="Bass",   type="filepath", interactive=False)
-        other_out  = gr.Audio(label="Other (guitars / keys / etc.)", type="filepath", interactive=False)
+        other_out  = gr.Audio(label="Other (guitars / keys)", type="filepath", interactive=False)
         vocals_out = gr.Audio(label="Vocals (full)", type="filepath", interactive=False)
 
-    # ── Gender output ──
-    gr.Markdown("### Gender split", elem_classes=["section-label"])
+    gr.Markdown("### Gender split")
     with gr.Row():
         male_out   = gr.Audio(label="Male vocals",   type="filepath", interactive=False)
         female_out = gr.Audio(label="Female vocals", type="filepath", interactive=False)
-
-    gr.Markdown(
-        "> **Tip:** On a clean duet recording results are excellent. "
-        "For dense mixes with overlapping voices, some bleed between male and female tracks is expected.",
-    )
 
     run_btn.click(
         fn=run_pipeline,
