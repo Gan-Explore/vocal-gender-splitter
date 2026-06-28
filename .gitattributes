@@ -1,0 +1,15 @@
+# Normalize line endings automatically per platform
+* text=auto
+
+# Force Unix line endings for Python files
+*.py text eol=lf
+
+# Force Unix line endings for JS files
+*.js text eol=lf
+
+# Binary files - no line ending conversion
+*.png binary
+*.wav binary
+*.mp3 binary
+*.flac binary
+*.ogg binary
