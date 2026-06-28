@@ -3,8 +3,15 @@ import torch
 import torchaudio
 import numpy as np
 import os
+import ssl
+import certifi
 import tempfile
 from pathlib import Path
+
+# Fix SSL cert issues with Pinokio's bundled miniconda Python
+os.environ["SSL_CERT_FILE"] = certifi.where()
+os.environ["REQUESTS_CA_BUNDLE"] = certifi.where()
+ssl._create_default_https_context = ssl._create_unverified_context
 
 
 # ── Demucs full stem separation ─────────────────────────────────────────────
