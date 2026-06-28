@@ -168,10 +168,11 @@ def run_pipeline(audio_file, skip_demucs, progress=gr.Progress()):
 
 
 # ── Gradio UI ────────────────────────────────────────────────────────────────
-with gr.Blocks(
-    title="Vocal Gender Splitter",
-    theme=gr.themes.Soft(primary_hue="blue", neutral_hue="slate"),
-    css="""
+# with gr.Blocks(
+#    title="Vocal Gender Splitter",
+#    theme=gr.themes.Soft(primary_hue="blue", neutral_hue="slate"),
+#    css="""
+with gr.Blocks(title="Vocal Gender Splitter") as demo:
         .gradio-container { max-width: 960px !important; margin: auto; }
         #title    { text-align: center; margin-bottom: 0.25rem; }
         #subtitle { text-align: center; color: #64748b; margin-bottom: 1.5rem; font-size: 0.9rem; }
@@ -229,8 +230,7 @@ with gr.Blocks(
 
 if __name__ == "__main__":
     demo.launch(
-        server_name="0.0.0.0",
-        server_port=int(os.environ.get("GRADIO_SERVER_PORT", 7860)),
-        inbrowser=False,
-        share=False,
+        server_name="127.0.0.1",
+        server_port=7860,
+        inbrowser=True,
     )
