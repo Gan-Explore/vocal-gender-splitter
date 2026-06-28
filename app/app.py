@@ -57,71 +57,112 @@ def separate_stems(audio_path: str, progress=gr.Progress()):
     return paths, sr
 
 
-# ── Pitch-based gender split ─────────────────────────────────────────────────
+# ── Adaptive pitch-based gender split ───────────────────────────────────────
 def classify_and_split(vocals_path: str, sr_hint: int, progress=gr.Progress()):
+    import librosa
+    from scipy.signal import medfilt
+
     waveform, sr = torchaudio.load(vocals_path)
-    if waveform.shape[0] > 1:
-        mono = waveform.mean(0, keepdim=True)
+    mono = waveform.mean(0).numpy() if waveform.shape[0] > 1 else waveform[0].numpy()
+
+    total_samples = len(mono)
+    segment_len   = int(sr * 1.5)   # 1.5-second windows
+    hop           = int(sr * 0.75)  # 50% overlap
+
+    progress(0.55, desc="Estimating pitch for every segment...")
+
+    # Pass 1 — collect F0 for every voiced segment
+    f0_list    = []   # median F0 per segment (None if unvoiced)
+    seg_starts = list(range(0, total_samples - segment_len, hop))
+
+    for start in seg_starts:
+        seg = mono[start:start + segment_len]
+        f0, voiced_flag, _ = librosa.pyin(
+            seg,
+            fmin=librosa.note_to_hz("C2"),
+            fmax=librosa.note_to_hz("C7"),
+            sr=sr,
+        )
+        voiced = f0[voiced_flag & ~np.isnan(f0)]
+        f0_list.append(float(np.median(voiced)) if len(voiced) >= 3 else None)
+
+    # Pass 2 — find adaptive threshold via K-means on voiced segments
+    voiced_f0s = np.array([v for v in f0_list if v is not None])
+    threshold  = 185.0   # fallback if not enough data
+
+    if len(voiced_f0s) >= 4:
+        # Simple 1-D K-means with 2 clusters (lower = male, higher = female)
+        from scipy.cluster.vq import kmeans
+        log_f0 = np.log(voiced_f0s)   # cluster in log-frequency (perceptually uniform)
+        init_centers = np.array([np.log(130.0), np.log(230.0)])
+        for _ in range(20):
+            dists  = np.abs(log_f0[:, None] - init_centers[None, :])
+            assign = np.argmin(dists, axis=1)
+            new_c  = np.array([log_f0[assign == k].mean() if (assign == k).any()
+                               else init_centers[k] for k in range(2)])
+            if np.allclose(new_c, init_centers, atol=1e-4):
+                break
+            init_centers = new_c
+        centers   = np.sort(np.exp(init_centers))   # Hz, low → high
+        threshold = float(np.sqrt(centers[0] * centers[1]))  # geometric midpoint
+        spread    = centers[1] - centers[0]
+        label_info = (
+            "Adaptive threshold: " + str(int(threshold)) + " Hz  "
+            "(male centre " + str(int(centers[0])) + " Hz, "
+            "female centre " + str(int(centers[1])) + " Hz, "
+            "spread " + str(int(spread)) + " Hz)"
+        )
     else:
-        mono = waveform
+        label_info = "Fallback threshold: 185 Hz (not enough voiced segments to cluster)"
 
-    total_samples = mono.shape[1]
-    segment_len   = int(sr * 2.0)
-    hop           = int(sr * 1.0)
+    progress(0.72, desc="Labelling segments...")
 
-    male_mask   = torch.zeros(total_samples)
-    female_mask = torch.zeros(total_samples)
-
-    progress(0.60, desc="Classifying vocal segments by gender...")
-    labels = []
-    for start in range(0, total_samples - segment_len, hop):
-        seg = mono[0, start:start + segment_len].numpy()
-        f0  = estimate_pitch(seg, sr)
+    # Pass 3 — label each segment using adaptive threshold
+    raw_labels = []
+    for f0 in f0_list:
         if f0 is None:
-            labels.append("unknown")
-        elif f0 < 185:
-            labels.append("male")
+            raw_labels.append("unknown")
+        elif f0 < threshold:
+            raw_labels.append("male")
         else:
-            labels.append("female")
+            raw_labels.append("female")
 
-    fade_samples = int(sr * 0.05)
-    for i, label in enumerate(labels):
-        start = i * hop
-        end   = min(start + segment_len, total_samples)
-        win   = torch.ones(end - start)
-        fi    = min(fade_samples, end - start)
-        win[:fi]  *= torch.linspace(0, 1, fi)
-        win[-fi:] *= torch.linspace(1, 0, fi)
+    # Smooth labels: majority vote over a 3-segment window to reduce flicker
+    labels = list(raw_labels)
+    for i in range(1, len(raw_labels) - 1):
+        window = [raw_labels[i - 1], raw_labels[i], raw_labels[i + 1]]
+        voiced_window = [l for l in window if l != "unknown"]
+        if len(voiced_window) == 2 and voiced_window[0] == voiced_window[1]:
+            labels[i] = voiced_window[0]
+
+    # Pass 4 — build smooth masks with crossfade
+    male_mask   = np.zeros(total_samples, dtype=np.float32)
+    female_mask = np.zeros(total_samples, dtype=np.float32)
+    fade        = int(sr * 0.06)
+
+    for i, (start, label) in enumerate(zip(seg_starts, labels)):
+        end = min(start + segment_len, total_samples)
+        win = np.ones(end - start, dtype=np.float32)
+        fi  = min(fade, end - start)
+        win[:fi]  *= np.linspace(0, 1, fi)
+        win[-fi:] *= np.linspace(1, 0, fi)
         if label == "male":
-            male_mask[start:end]   = torch.max(male_mask[start:end], win)
+            male_mask[start:end]   = np.maximum(male_mask[start:end], win)
         elif label == "female":
-            female_mask[start:end] = torch.max(female_mask[start:end], win)
+            female_mask[start:end] = np.maximum(female_mask[start:end], win)
 
-    progress(0.85, desc="Writing male / female files...")
+    progress(0.88, desc="Writing male / female files...")
     stereo = waveform if waveform.shape[0] == 2 else waveform.repeat(2, 1)
+    male_t   = torch.from_numpy(male_mask).unsqueeze(0)
+    female_t = torch.from_numpy(female_mask).unsqueeze(0)
 
     out_dir     = Path(tempfile.mkdtemp())
     male_path   = str(out_dir / "male_vocals.wav")
     female_path = str(out_dir / "female_vocals.wav")
-    torchaudio.save(male_path,   stereo * male_mask.unsqueeze(0),   sr)
-    torchaudio.save(female_path, stereo * female_mask.unsqueeze(0), sr)
+    torchaudio.save(male_path,   stereo * male_t,   sr)
+    torchaudio.save(female_path, stereo * female_t, sr)
 
-    return male_path, female_path, labels
-
-
-def estimate_pitch(signal: np.ndarray, sr: int):
-    try:
-        import librosa
-        f0, voiced_flag, _ = librosa.pyin(
-            signal,
-            fmin=librosa.note_to_hz("C2"),
-            fmax=librosa.note_to_hz("C6"),
-            sr=sr,
-        )
-        voiced = f0[voiced_flag]
-        return float(np.median(voiced)) if len(voiced) > 0 else None
-    except Exception:
-        return None
+    return male_path, female_path, labels, label_info
 
 
 # ── Full pipeline ────────────────────────────────────────────────────────────
@@ -145,7 +186,7 @@ def run_pipeline(audio_file, skip_demucs, progress=gr.Progress()):
             bass_path   = stem_paths["bass"]
             other_path  = stem_paths["other"]
 
-        male_path, female_path, labels = classify_and_split(vocals_path, sr, progress)
+        male_path, female_path, labels, label_info = classify_and_split(vocals_path, sr, progress)
 
         male_count   = labels.count("male")
         female_count = labels.count("female")
@@ -155,10 +196,12 @@ def run_pipeline(audio_file, skip_demucs, progress=gr.Progress()):
         summary = (
             ("Stems separated + " if not skip_demucs else "") + "Gender split complete\n"
             + "-" * 33 + "\n"
-            + "Segments analysed : " + str(total) + " (" + str(total * 2) + "s)\n"
+            + "Segments analysed : " + str(total) + "\n"
             + "Male              : " + str(male_count) + " (" + str(100 * male_count // max(total, 1)) + "%)\n"
             + "Female            : " + str(female_count) + " (" + str(100 * female_count // max(total, 1)) + "%)\n"
             + "Unvoiced / silent : " + str(unknown) + "\n"
+            + "-" * 33 + "\n"
+            + label_info + "\n"
             + "-" * 33 + "\n"
             + device_str
         )
